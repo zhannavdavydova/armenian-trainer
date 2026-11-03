@@ -7,7 +7,7 @@ const INTERVALS = [3, 6, 12, 25, 50, 100, 200];
 // слово выучено после стольких правильных ответов (в любом направлении)
 const LEARNED_AFTER = 3;
 // запасные модели, если список моделей Google получить не удалось
-const FALLBACK_MODELS = ['gemini-2.5-flash-lite', 'gemini-2.5-flash'];
+const FALLBACK_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
 
 const PRAISE = [
   'Молодец!', 'Всё верно!', 'Ты просто вау!', 'Ты супер класс!', 'Ապրե՛ս! Умница!', 'Браво!',
@@ -257,6 +257,8 @@ function setVerdict(kind, title, heard) {
 }
 
 function reveal() {
+  // «подумай ещё» над открытым ответом только путает — убираем
+  if ($('verdict').classList.contains('bad')) setVerdict(null);
   $('answer').classList.add('on');
   $('hint').textContent = '';
 }
@@ -464,7 +466,8 @@ function onVoiceResult(res) {
     autoNext = setTimeout(() => { if (cur === same && !$('nextControls').hidden && !$('viewTrain').hidden) nextCard(); }, 1500);
   } else {
     if (!graded) grade('wrong');
-    setVerdict('bad', pick(TRY_AGAIN), res.heard);
+    // если услышанное почти совпадает с ответом, не показываем его — это была бы подсказка
+    setVerdict('bad', pick(TRY_AGAIN), res.sim < 0.5 ? res.heard : '');
     animateCard('shake');
     phase('retry');
   }
@@ -526,24 +529,22 @@ function trimSilence(pcm, rate) {
 // ---------- проверка через Gemini ----------
 const API = 'https://generativelanguage.googleapis.com/v1beta/';
 
-function buildPrompt() {
+// модель только записывает, что услышала, — правильный ответ ей НЕ показываем,
+// иначе она «слышит» ожидаемое слово. Сравнивает уже само приложение.
+function transcribePrompt() {
   if (S.mode === 'ru2hy') {
-    return `Ты проверяешь тренировку армянских слов. Ученице показали по-русски: «${cur.ru}».
-Правильный ответ по-армянски (восточноармянский): «${cur.hy}». Если в ответе есть «/», подходит любой из вариантов.
-На записи она произносит ответ по-армянски.
-1) heard — запиши армянскими буквами то, что она сказала (пустая строка, если речи нет).
-2) correct — true, если она сказала правильное слово или выражение. Прощай акцент, разговорное произношение (например «ա» вместо «է» в конце) и мелкие фонетические неточности. false — если это другое слово, другая форма, пропущена часть выражения или речи нет.`;
+    return `На записи человек произносит одно армянское слово или короткое выражение (восточноармянский, возможно разговорное произношение).
+Запиши армянскими буквами ровно то, что прозвучало. Не исправляй, не угадывай и не подбирай похожее слово — только услышанное.
+Если речи нет или ничего не разобрать — пустая строка.`;
   }
-  return `Ты проверяешь тренировку армянских слов. Ученице показали армянское слово или выражение: «${cur.hy}».
-Правильный перевод на русский: «${cur.ru}». Если перечислено несколько вариантов, достаточно любого.
-На записи она произносит перевод по-русски.
-1) heard — запиши по-русски то, что она сказала (пустая строка, если речи нет).
-2) correct — true, если смысл совпадает с правильным переводом (синонимы и другая грамматическая форма подходят). false — если смысл другой или речи нет.`;
+  return `На записи человек произносит одно русское слово или короткое выражение.
+Запиши по-русски ровно то, что прозвучало. Не исправляй и не подбирай похожее — только услышанное.
+Если речи нет или ничего не разобрать — пустая строка.`;
 }
 
-// узнаём у Google, какие модели сейчас доступны по ключу; для одного слова быстрее всего «flash-lite»
+// узнаём у Google, какие модели сейчас доступны по ключу; берём обычную «flash» — она точнее слышит армянский
 async function getModels() {
-  if (S.models && S.models.length && S.modelsV === 2 && Date.now() - S.modelsAt < 3 * 864e5) return S.models;
+  if (S.models && S.models.length && S.modelsV === 3 && Date.now() - S.modelsAt < 3 * 864e5) return S.models;
   try {
     const res = await fetch(API + 'models?pageSize=1000', { headers: { 'x-goog-api-key': S.key } });
     if (!res.ok) return FALLBACK_MODELS;
@@ -553,11 +554,11 @@ async function getModels() {
       .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
       .map(m => m.name.replace(/^models\//, ''))
       .filter(n => /^gemini-\d+(\.\d+)?-flash(-lite)?(-preview)?(-[\d-]+)?$/.test(n))
-      .sort((a, b) => (a.includes('preview') - b.includes('preview')) || (b.includes('lite') - a.includes('lite')) || (ver(b) - ver(a)));
+      .sort((a, b) => (a.includes('preview') - b.includes('preview')) || (a.includes('lite') - b.includes('lite')) || (ver(b) - ver(a)));
     if (!names.length) return FALLBACK_MODELS;
     S.models = names.slice(0, 4);
     S.modelsAt = Date.now();
-    S.modelsV = 2;
+    S.modelsV = 3;
     save(false);
     return S.models;
   } catch (e) {
@@ -565,16 +566,15 @@ async function getModels() {
   }
 }
 
-async function checkAnswer(audio) {
+// перебираем модели, пока одна не ответит; сработавшую запоминаем первой
+async function askGemini(parts, schema) {
   const models = await getModels();
   const errors = [];
   for (const m of models) {
     try {
-      const res = await callGemini(m, buildPrompt(), audio);
-      if (!res.correct && sameText(res.heard, target())) res.correct = true;
-      // сработавшую модель ставим первой, чтобы в следующий раз не перебирать
+      const out = await callGemini(m, parts, schema);
       if (S.models && S.models[0] !== m) { S.models = [m, ...S.models.filter(x => x !== m)]; save(false); }
-      return res;
+      return out;
     } catch (e) {
       if (e.userMsg) throw e;
       errors.push(e.message);
@@ -585,29 +585,79 @@ async function checkAnswer(audio) {
   throw new Error(errors.join(' | '));
 }
 
-function norm(s) {
-  return (s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]+/gu, '');
-}
-function sameText(heard, expected) {
-  const h = norm(heard);
-  if (!h) return false;
-  return expected.split(/[\/,]/).some(v => norm(v) === h);
+async function checkAnswer(audio) {
+  const out = await askGemini(
+    [{ text: transcribePrompt() }, { inline_data: { mime_type: audio.mime, data: audio.data } }],
+    { type: 'OBJECT', properties: { heard: { type: 'STRING' } }, required: ['heard'] }
+  );
+  const heard = String(out.heard || '').trim();
+  const sim = similarity(heard, target());
+  let correct = isMatch(heard, target());
+  // для перевода на русский синонимы тоже засчитываем — это проверяем отдельным текстовым вопросом
+  if (!correct && S.mode === 'hy2ru' && heard) correct = await sameMeaning(heard).catch(() => false);
+  return { heard, correct, sim };
 }
 
-async function callGemini(model, prompt, audio, noThinking) {
+async function sameMeaning(heard) {
+  const out = await askGemini(
+    [{ text: `Армянское слово/выражение «${cur.hy}» переводится как «${cur.ru}». Ученица ответила по-русски: «${heard}».
+Это тот же смысл (синоним, другая форма того же слова)? Если смысл другой — false.` }],
+    { type: 'OBJECT', properties: { same: { type: 'BOOLEAN' } }, required: ['same'] }
+  );
+  return !!out.same;
+}
+
+// ---------- сравнение ответа с правильным ----------
+function norm(s) {
+  return (s || '').toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/և/g, 'եվ').replace(/է/g, 'ե').replace(/օ/g, 'ո') // армянские буквы, которые звучат одинаково
+    .replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+// варианты ответа: «զով / հով», «сфера, область», «снимать (кино)» → снимать
+function variants(expected) {
+  const base = expected.replace(/\([^)]*\)/g, ' ');
+  return [expected, base, ...base.split(/[\/,;]/)].map(norm).filter(Boolean);
+}
+
+function levenshtein(a, b) {
+  const A = [...a], B = [...b];
+  let prev = Array.from({ length: B.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= A.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= B.length; j++)
+      row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (A[i - 1] === B[j - 1] ? 0 : 1));
+    prev = row;
+  }
+  return prev[B.length];
+}
+
+// насколько услышанное похоже на правильный ответ: 1 — совпадает, 0 — ничего общего
+function similarity(heard, expected) {
+  const h = norm(heard);
+  if (!h) return 0;
+  return Math.max(...variants(expected).map(v => 1 - levenshtein(h, v) / Math.max([...h].length, [...v].length)));
+}
+
+// засчитываем, если совпало или отличается на мелочь (акцент, одна-две буквы в длинном слове)
+function isMatch(heard, expected) {
+  const h = norm(heard);
+  if (!h) return false;
+  return variants(expected).some(v => {
+    const d = levenshtein(h, v), len = Math.max([...h].length, [...v].length);
+    if (len <= 4) return d === 0; // короткие слова — только точно (բանտ ≠ բանկ)
+    if (len <= 8) return d <= 1;
+    return d / len <= 0.15;
+  });
+}
+
+async function callGemini(model, parts, schema, noThinking) {
   const body = {
-    contents: [{ role: 'user', parts: [{ text: prompt }, { inline_data: { mime_type: audio.mime, data: audio.data } }] }],
-    generationConfig: {
-      temperature: 0,
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: 'OBJECT',
-        properties: { heard: { type: 'STRING' }, correct: { type: 'BOOLEAN' } },
-        required: ['heard', 'correct']
-      }
-    }
+    contents: [{ role: 'user', parts }],
+    generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: schema }
   };
-  // «размышления» модели для одного слова не нужны и сильно замедляют ответ
+  // «размышления» модели здесь не нужны и сильно замедляют ответ
   if (!noThinking) {
     const v = parseFloat((model.match(/gemini-(\d+(?:\.\d+)?)/) || [0, 0])[1]);
     body.generationConfig.thinkingConfig = v >= 3 ? { thinkingLevel: 'minimal' } : { thinkingBudget: 0 };
@@ -619,7 +669,7 @@ async function callGemini(model, prompt, audio, noThinking) {
   });
   if (!res.ok) {
     const text = await res.text();
-    if (res.status === 400 && /thinking/i.test(text) && !noThinking) return callGemini(model, prompt, audio, true);
+    if (res.status === 400 && /thinking/i.test(text) && !noThinking) return callGemini(model, parts, schema, true);
     if ((res.status === 400 && /api key/i.test(text)) || res.status === 401 || res.status === 403)
       throw userError('Ключ Gemini не подходит — проверь его в Профиле');
     if (res.status === 429) throw userError('Лимит Gemini пока исчерпан — отметь сама, позже голос снова заработает');
@@ -629,10 +679,8 @@ async function callGemini(model, prompt, audio, noThinking) {
   }
   const j = await res.json();
   const txt = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
-  let out;
-  try { out = JSON.parse(txt.replace(/^```(json)?|```$/g, '').trim()); }
+  try { return JSON.parse(txt.replace(/^```(json)?|```$/g, '').trim()); }
   catch (e) { throw new Error(model + ': непонятный ответ «' + txt.slice(0, 60) + '»'); }
-  return { heard: String(out.heard || '').trim(), correct: !!out.correct };
 }
 
 async function testKey(key) {
