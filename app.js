@@ -7,7 +7,7 @@ const INTERVALS = [3, 6, 12, 25, 50, 100, 200];
 // слово выучено после стольких правильных ответов (в любом направлении)
 const LEARNED_AFTER = 3;
 // запасные модели, если список моделей Google получить не удалось
-const FALLBACK_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+const FALLBACK_MODELS = ['gemini-2.5-flash-lite', 'gemini-2.5-flash'];
 
 const PRAISE = [
   'Молодец!', 'Всё верно!', 'Ты просто вау!', 'Ты супер класс!', 'Ապրե՛ս! Умница!', 'Браво!',
@@ -51,13 +51,16 @@ const $ = id => document.getElementById(id);
 const pick = list => list[Math.random() * list.length | 0];
 
 function defaults() {
-  return { step: 0, mode: 'ru2hy', streak: 0, best: 0, cards: {}, learned: {}, key: '', theme: 'light', models: null, modelsAt: 0 };
+  return { step: 0, mode: 'ru2hy', streak: 0, best: 0, cards: {}, learned: {}, key: '', theme: 'light', models: null, modelsAt: 0,
+    ghToken: '', gistId: '', backupAt: 0, backupDirty: false };
 }
 function load() {
   try { return Object.assign(defaults(), JSON.parse(localStorage.getItem(STORE) || '{}')); }
   catch (e) { return defaults(); }
 }
-function save() {
+// progressChanged: false — когда сохраняем служебное (ключи, отметку о копии), а не прогресс
+function save(progressChanged = true) {
+  if (progressChanged) S.backupDirty = true;
   try { localStorage.setItem(STORE, JSON.stringify(S)); } catch (e) {}
 }
 
@@ -65,8 +68,9 @@ let S = load();
 let WORDS = [];
 
 // ---------- уровни ----------
-// чтобы получить уровень L, нужно выучить 5·L·(L−1)/2 слов: 0, 5, 15, 30, 50, 75…
-const levelNeed = L => 5 * L * (L - 1) / 2;
+// каждый уровень — ещё 30 выученных слов: уровень 2 с 30 слов, 3 с 60, 4 с 90…
+const WORDS_PER_LEVEL = 30;
+const levelNeed = L => WORDS_PER_LEVEL * (L - 1);
 function levelOf(n) {
   let L = 1;
   while (levelNeed(L + 1) <= n) L++;
@@ -88,10 +92,10 @@ function renderLevel() {
   const from = levelNeed(L), to = levelNeed(L + 1);
   const pct = Math.round((n - from) / (to - from) * 100);
   const left = to - n;
-  $('lvLabel').textContent = 'Уровень ' + L;
+  $('lvLabel').textContent = levelName(L);
   $('lvBar').style.width = pct + '%';
   $('lvWords').textContent = wordsTxt(n) + ' выучено';
-  $('lvLeft').textContent = 'до уровня ' + (L + 1) + ': ' + left;
+  $('lvLeft').textContent = 'до следующего уровня: ' + left;
   $('stLvNum').textContent = 'Уровень ' + L;
   $('stLvName').textContent = levelName(L);
   $('stLvBar').style.width = pct + '%';
@@ -132,7 +136,7 @@ function grade(kind) {
   if (kind === 'wrong') {
     r.wrong++;
     r.lvl = 0;
-    r.due = S.step + 3 + (Math.random() * 2 | 0);
+    r.due = S.step + 7 + (Math.random() * 2 | 0); // между ошибкой и повтором — 6–7 других карточек
     S.streak = 0;
   } else {
     r.right++;
@@ -166,11 +170,13 @@ function backfillLearned() {
 let cur = null;
 let graded = false;
 let hints = 0;
+let autoNext = null;
 
 const target = () => (S.mode === 'ru2hy' ? cur.hy : cur.ru);
 const promptText = () => (S.mode === 'ru2hy' ? cur.ru : cur.hy);
 
 function nextCard() {
+  clearTimeout(autoNext);
   cur = pickWord(cur);
   graded = false;
   hints = 0;
@@ -338,13 +344,14 @@ function welcome() {
   text = text.replace('{n}', wordsTxt(n));
   const emoji = pick(WELCOME_EMOJI);
   $('ava').textContent = emoji;
-  const ov = buildOverlay(emoji, 'Привет, Жанна!', text, 'Давай начнём →');
+  const ov = buildOverlay(emoji, 'Привет, Жанна!', text, 'давай начнём');
   const close = () => { ov.classList.add('out'); setTimeout(() => ov.remove(), 350); };
   ov.querySelector('.btn').onclick = close;
 }
 
 // ---------- запись голоса ----------
 let stream = null, recorder = null, chunks = [], recTimer = null;
+let vadCtx = null, vadTimer = null;
 
 async function startRec() {
   if (!stream || stream.getAudioTracks().every(t => t.readyState === 'ended')) {
@@ -356,13 +363,47 @@ async function startRec() {
   recorder.onstop = onRecStop;
   recorder.start();
   $('mic').classList.add('rec');
-  $('micLabel').textContent = 'Говори… нажми, когда закончишь';
+  $('micLabel').textContent = 'Говори… я сам пойму, когда закончишь';
   $('note').textContent = '';
   recTimer = setTimeout(stopRec, 8000);
+  watchSilence();
+}
+
+// автостоп: как только после речи наступает пауза ~0,7 с, запись останавливается сама
+function watchSilence() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    vadCtx = vadCtx || new AC();
+    const src = vadCtx.createMediaStreamSource(stream);
+    const an = vadCtx.createAnalyser();
+    an.fftSize = 1024;
+    src.connect(an);
+    const buf = new Float32Array(an.fftSize);
+    const started = Date.now();
+    let noise = 0.005, spoke = false, quietSince = 0;
+    vadTimer = setInterval(() => {
+      if (!recorder || recorder.state !== 'recording') { clearInterval(vadTimer); src.disconnect(); return; }
+      an.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      const rms = Math.sqrt(sum / buf.length);
+      const t = Date.now() - started;
+      if (t < 250) { noise = Math.max(noise, rms); return; } // первые доли секунды — меряем фоновый шум
+      const loud = rms > Math.max(0.02, noise * 2.5);
+      if (loud) { spoke = true; quietSince = 0; }
+      else if (spoke) {
+        quietSince = quietSince || Date.now();
+        if (Date.now() - quietSince > 700) stopRec();
+      } else if (t > 5000) stopRec(); // так и не заговорила
+    }, 50);
+  } catch (e) {
+    console.warn('Автостоп недоступен', e);
+  }
 }
 
 function stopRec() {
   clearTimeout(recTimer);
+  clearInterval(vadTimer);
   if (recorder && recorder.state === 'recording') recorder.stop();
 }
 
@@ -417,6 +458,10 @@ function onVoiceResult(res) {
     reveal();
     animateCard('pop');
     phase('done');
+    // через полторы секунды — следующая карточка сама (если ничего не нажали раньше)
+    const same = cur;
+    clearTimeout(autoNext);
+    autoNext = setTimeout(() => { if (cur === same && !$('nextControls').hidden && !$('viewTrain').hidden) nextCard(); }, 1500);
   } else {
     if (!graded) grade('wrong');
     setVerdict('bad', pick(TRY_AGAIN), res.heard);
@@ -452,7 +497,7 @@ async function toWav16k(blob) {
   src.connect(off.destination);
   src.start();
   const out = await off.startRendering();
-  const pcm = out.getChannelData(0);
+  const pcm = trimSilence(out.getChannelData(0), rate);
   const view = new DataView(new ArrayBuffer(44 + pcm.length * 2));
   const str = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
   str(0, 'RIFF'); view.setUint32(4, 36 + pcm.length * 2, true); str(8, 'WAVE');
@@ -463,7 +508,19 @@ async function toWav16k(blob) {
     const x = Math.max(-1, Math.min(1, pcm[i]));
     view.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
   }
-  return { mime: 'audio/wav', data: bytesToB64(new Uint8Array(view.buffer)), seconds: audio.duration };
+  return { mime: 'audio/wav', data: bytesToB64(new Uint8Array(view.buffer)), seconds: pcm.length / rate };
+}
+
+// отрезаем тишину в начале и в конце (с запасом 0,15 с), чтобы файл был меньше и уходил быстрее
+function trimSilence(pcm, rate) {
+  let peak = 0;
+  for (let i = 0; i < pcm.length; i++) peak = Math.max(peak, Math.abs(pcm[i]));
+  if (peak < 0.01) return pcm;
+  const thr = Math.max(0.015, peak * 0.08), pad = Math.round(rate * 0.15);
+  let a = 0, b = pcm.length - 1;
+  while (a < pcm.length && Math.abs(pcm[a]) < thr) a++;
+  while (b > a && Math.abs(pcm[b]) < thr) b--;
+  return pcm.subarray(Math.max(0, a - pad), Math.min(pcm.length, b + pad));
 }
 
 // ---------- проверка через Gemini ----------
@@ -484,9 +541,9 @@ function buildPrompt() {
 2) correct — true, если смысл совпадает с правильным переводом (синонимы и другая грамматическая форма подходят). false — если смысл другой или речи нет.`;
 }
 
-// узнаём у Google, какие модели сейчас доступны по ключу, и берём лучшие «flash»
+// узнаём у Google, какие модели сейчас доступны по ключу; для одного слова быстрее всего «flash-lite»
 async function getModels() {
-  if (S.models && S.models.length && Date.now() - S.modelsAt < 3 * 864e5) return S.models;
+  if (S.models && S.models.length && S.modelsV === 2 && Date.now() - S.modelsAt < 3 * 864e5) return S.models;
   try {
     const res = await fetch(API + 'models?pageSize=1000', { headers: { 'x-goog-api-key': S.key } });
     if (!res.ok) return FALLBACK_MODELS;
@@ -496,11 +553,12 @@ async function getModels() {
       .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
       .map(m => m.name.replace(/^models\//, ''))
       .filter(n => /^gemini-\d+(\.\d+)?-flash(-lite)?(-preview)?(-[\d-]+)?$/.test(n))
-      .sort((a, b) => (a.includes('preview') - b.includes('preview')) || (ver(b) - ver(a)) || (a.includes('lite') - b.includes('lite')));
+      .sort((a, b) => (a.includes('preview') - b.includes('preview')) || (b.includes('lite') - a.includes('lite')) || (ver(b) - ver(a)));
     if (!names.length) return FALLBACK_MODELS;
     S.models = names.slice(0, 4);
     S.modelsAt = Date.now();
-    save();
+    S.modelsV = 2;
+    save(false);
     return S.models;
   } catch (e) {
     return FALLBACK_MODELS;
@@ -514,6 +572,8 @@ async function checkAnswer(audio) {
     try {
       const res = await callGemini(m, buildPrompt(), audio);
       if (!res.correct && sameText(res.heard, target())) res.correct = true;
+      // сработавшую модель ставим первой, чтобы в следующий раз не перебирать
+      if (S.models && S.models[0] !== m) { S.models = [m, ...S.models.filter(x => x !== m)]; save(false); }
       return res;
     } catch (e) {
       if (e.userMsg) throw e;
@@ -547,7 +607,11 @@ async function callGemini(model, prompt, audio, noThinking) {
       }
     }
   };
-  if (!noThinking) body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  // «размышления» модели для одного слова не нужны и сильно замедляют ответ
+  if (!noThinking) {
+    const v = parseFloat((model.match(/gemini-(\d+(?:\.\d+)?)/) || [0, 0])[1]);
+    body.generationConfig.thinkingConfig = v >= 3 ? { thinkingLevel: 'minimal' } : { thinkingBudget: 0 };
+  }
   const res = await fetch(API + 'models/' + model + ':generateContent', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': S.key },
@@ -574,6 +638,98 @@ async function callGemini(model, prompt, audio, noThinking) {
 async function testKey(key) {
   const res = await fetch(API + 'models?pageSize=1', { headers: { 'x-goog-api-key': key } });
   return res.ok;
+}
+
+// ---------- резервная копия в GitHub (закрытый gist) ----------
+const GH = 'https://api.github.com/';
+const GIST_FILE = 'armenian-trainer-progress.json';
+const GIST_DESC = 'Армянский тренажёр — резервная копия прогресса';
+const ghHeaders = token => ({ Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json' });
+const PROGRESS_FIELDS = ['step', 'mode', 'streak', 'best', 'cards', 'learned', 'theme'];
+
+// в копию идёт только прогресс — ключи Gemini и GitHub остаются на телефоне
+function backupPayload() {
+  const out = { v: 1, savedAt: Date.now() };
+  for (const k of PROGRESS_FIELDS) out[k] = S[k];
+  return JSON.stringify(out);
+}
+
+async function findGist(token) {
+  for (let page = 1; page <= 5; page++) {
+    const res = await fetch(GH + 'gists?per_page=100&page=' + page, { headers: ghHeaders(token) });
+    if (!res.ok) throw new Error('GitHub ' + res.status);
+    const list = await res.json();
+    const g = list.find(x => x.files && x.files[GIST_FILE]);
+    if (g) return g.id;
+    if (list.length < 100) break;
+  }
+  return '';
+}
+
+async function readGist(token, id) {
+  const res = await fetch(GH + 'gists/' + id, { headers: ghHeaders(token) });
+  if (!res.ok) throw new Error('GitHub ' + res.status);
+  const f = (await res.json()).files[GIST_FILE];
+  const content = f.truncated ? await (await fetch(f.raw_url)).text() : f.content;
+  return JSON.parse(content);
+}
+
+// одна запись, которая каждый раз перезаписывается; keepalive — чтобы успело уйти при закрытии
+async function uploadBackup(onClose) {
+  if (!S.ghToken || !S.backupDirty || !WORDS.length) return;
+  const content = backupPayload();
+  const body = JSON.stringify(S.gistId
+    ? { files: { [GIST_FILE]: { content } } }
+    : { description: GIST_DESC, public: false, files: { [GIST_FILE]: { content } } });
+  const opts = { method: S.gistId ? 'PATCH' : 'POST', headers: { ...ghHeaders(S.ghToken), 'Content-Type': 'application/json' }, body };
+  const url = GH + 'gists' + (S.gistId ? '/' + S.gistId : '');
+  let res;
+  try {
+    res = await fetch(url, onClose && new Blob([body]).size < 60000 ? { ...opts, keepalive: true } : opts);
+  } catch (e) {
+    res = await fetch(url, opts).catch(() => null); // если keepalive не поддержан — обычным запросом
+  }
+  if (!res || !res.ok) { console.warn('Копия не сохранилась', res && res.status); return; }
+  if (!S.gistId) S.gistId = (await res.json()).id;
+  S.backupDirty = false;
+  S.backupAt = Date.now();
+  save(false);
+}
+
+function restoreFrom(r) {
+  for (const k of PROGRESS_FIELDS) if (r[k] !== undefined) S[k] = r[k];
+  S.backupDirty = false;
+  save(false);
+  applyTheme(); renderMode(); renderStreak(); renderLevel(); nextCard();
+}
+
+async function connectBackup(token) {
+  const note = $('ghNote');
+  note.textContent = 'Подключаю…';
+  try {
+    const id = await findGist(token);
+    S.ghToken = token;
+    S.gistId = id;
+    if (id) {
+      const remote = await readGist(token, id);
+      if ((remote.step || 0) > S.step) {
+        const date = new Date(remote.savedAt).toLocaleString('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+        if (S.step === 0 || confirm('Нашёл копию прогресса от ' + date + ' — в ней больше ответов, чем на телефоне. Восстановить?')) {
+          restoreFrom(remote);
+          note.textContent = 'Прогресс восстановлен ✓ Копия подключена';
+          return;
+        }
+      }
+    }
+    S.backupDirty = true;
+    save(false);
+    await uploadBackup(false);
+    note.textContent = S.gistId ? 'Копия подключена ✓ Дальше она обновляется сама' : 'Не удалось сохранить копию — попробуй ещё раз';
+  } catch (e) {
+    note.textContent = /401|403/.test(e.message)
+      ? 'GitHub не принял ключ — проверь, что он скопирован целиком и стоит галочка «gist»'
+      : 'Не получилось подключиться (' + e.message + ')';
+  }
 }
 
 // ---------- серия и статистика ----------
@@ -628,18 +784,62 @@ function renderStats() {
   }
 }
 
+// ---------- словарь ----------
+let dictFilter = 'all';
+
+function wordStatus(w) {
+  if (S.learned[w.hy]) return 'learned';
+  return rec(w, 'ru2hy') || rec(w, 'hy2ru') ? 'progress' : 'new';
+}
+const STATUS_TXT = { learned: 'выучено', progress: 'в процессе', new: 'новое' };
+
+function renderDict() {
+  const q = norm($('dictSearch').value);
+  const rows = WORDS.filter(w => (dictFilter === 'all' || wordStatus(w) === dictFilter) &&
+    (!q || norm(w.hy).includes(q) || norm(w.ru).includes(q)));
+  $('dictCount').textContent = wordsTxt(rows.length);
+  const list = $('dictList');
+  list.innerHTML = '';
+  for (const w of rows) {
+    const a = rec(w, 'ru2hy') || {}, b = rec(w, 'hy2ru') || {};
+    const right = (a.right || 0) + (b.right || 0), wrong = (a.wrong || 0) + (b.wrong || 0);
+    const st = wordStatus(w);
+    const it = document.createElement('div');
+    it.className = 'item';
+    const box = document.createElement('div');
+    box.className = 'w';
+    const hb = document.createElement('b'); hb.textContent = w.hy;
+    const rs = document.createElement('span'); rs.textContent = w.ru;
+    const bd = document.createElement('div');
+    const badge = document.createElement('span'); badge.className = 'badge ' + st; badge.textContent = STATUS_TXT[st];
+    bd.appendChild(badge);
+    box.append(hb, rs, bd);
+    const c = document.createElement('div');
+    c.className = 'c';
+    if (right || wrong) {
+      const ok = document.createElement('span'); ok.className = 'ok'; ok.textContent = '✓ ' + right;
+      const bad = document.createElement('span'); bad.className = 'bad'; bad.textContent = '✗ ' + wrong;
+      c.append(ok, document.createElement('br'), bad);
+    }
+    it.append(box, c);
+    list.appendChild(it);
+  }
+}
+
 // ---------- интерфейс ----------
 function showView(id) {
-  for (const v of ['viewTrain', 'viewStats', 'viewSet']) $(v).hidden = v !== id;
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.view === id));
+  for (const v of ['viewTrain', 'viewStats', 'viewDict', 'viewSet']) $(v).hidden = v !== id;
+  const tabId = id === 'viewDict' ? 'viewStats' : id;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.view === tabId));
   if (id === 'viewStats') renderStats();
+  if (id === 'viewDict') renderDict();
   if (id === 'viewSet') openSettings();
   if (id === 'viewTrain' && !$('askControls').hidden) renderMic();
   window.scrollTo(0, 0);
 }
 
 function renderMode() {
-  $('modeLabel').textContent = S.mode === 'ru2hy' ? 'Русский → Армянский' : 'Армянский → Русский';
+  $('modeLabel').textContent = S.mode === 'ru2hy' ? 'RUS → ARM' : 'ARM → RUS';
 }
 
 function applyTheme() {
@@ -651,6 +851,12 @@ function bind() {
   $('mic').onclick = async () => {
     if (!S.key) { showView('viewSet'); return; }
     if (recorder && recorder.state === 'recording') { stopRec(); return; }
+    // iPhone разрешает звук только прямо в момент нажатия — готовим анализатор тишины сразу
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      vadCtx = vadCtx || new AC();
+      if (vadCtx.state === 'suspended') vadCtx.resume();
+    } catch (e) {}
     try { await startRec(); }
     catch (e) {
       console.error(e);
@@ -676,15 +882,23 @@ function bind() {
     save(); renderMode(); nextCard();
   };
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => showView(t.dataset.view));
+  $('dictBtn').onclick = () => showView('viewDict');
+  $('dictBack').onclick = () => showView('viewStats');
+  $('dictSearch').oninput = renderDict;
+  document.querySelectorAll('.fchip').forEach(ch => ch.onclick = () => {
+    dictFilter = ch.dataset.f;
+    document.querySelectorAll('.fchip').forEach(x => x.classList.toggle('on', x === ch));
+    renderDict();
+  });
 
   $('keySave').onclick = async () => {
     const key = $('keyInput').value.trim();
     const note = $('keyNote');
-    if (!key) { S.key = ''; save(); note.textContent = 'Ключ удалён'; return; }
+    if (!key) { S.key = ''; save(false); note.textContent = 'Ключ удалён'; return; }
     note.textContent = 'Проверяю ключ…';
     try {
       if (await testKey(key)) {
-        S.key = key; S.models = null; save();
+        S.key = key; S.models = null; save(false);
         note.textContent = 'Ключ работает ✓ Голосовая проверка включена';
       } else note.textContent = 'Google не принял ключ — проверь, что скопирован целиком';
     } catch (e) {
@@ -700,19 +914,33 @@ function bind() {
 
   window.addEventListener('online', () => { if (!$('askControls').hidden) renderMic(); });
   window.addEventListener('offline', () => { if (!$('askControls').hidden) renderMic(); });
-  document.addEventListener('visibilitychange', () => { if (document.hidden) { stopRec(); releaseMic(); } });
+  // закрытие или сворачивание приложения: отпускаем микрофон и обновляем резервную копию
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { stopRec(); releaseMic(); uploadBackup(true); }
+  });
+  window.addEventListener('pagehide', () => uploadBackup(true));
+
+  $('ghSave').onclick = () => {
+    const token = $('ghInput').value.trim();
+    if (!token) { S.ghToken = ''; S.gistId = ''; save(false); $('ghNote').textContent = 'Резервная копия отключена'; return; }
+    connectBackup(token);
+  };
 }
 
 function openSettings() {
   $('keyInput').value = S.key;
   $('keyNote').textContent = S.key ? 'Ключ сохранён' : '';
+  $('ghInput').value = S.ghToken;
+  $('ghNote').textContent = !S.ghToken ? '' : S.backupAt
+    ? 'Последняя копия: ' + new Date(S.backupAt).toLocaleString('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })
+    : 'Копия подключена';
   const models = S.models && S.models.length ? ' · модель: ' + S.models[0] : '';
   $('about').textContent = 'Слов в словаре: ' + WORDS.length + models;
 }
 
 async function init() {
   // старая тема из первой версии была тёмной по умолчанию — переводим на новую светлую
-  if (!S.themeV2) { S.theme = 'light'; S.themeV2 = true; save(); }
+  if (!S.themeV2) { S.theme = 'light'; S.themeV2 = true; save(false); }
   applyTheme();
   bind();
   renderMode();
@@ -725,10 +953,12 @@ async function init() {
     return;
   }
   backfillLearned();
-  save();
+  save(false);
   renderLevel();
   nextCard();
   welcome();
+  // если в прошлый раз копия не успела уйти при закрытии — досылаем сейчас
+  uploadBackup(false);
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 

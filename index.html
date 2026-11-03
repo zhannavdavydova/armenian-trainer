@@ -11,6 +11,8 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Армянский">
+<link rel="preconnect" href="https://generativelanguage.googleapis.com" crossorigin>
+<link rel="preconnect" href="https://api.github.com" crossorigin>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" href="icon-192.png">
@@ -161,7 +163,22 @@ input{width:100%;font:inherit;font-size:16px;color:var(--ink);background:var(--s
 .ov-emoji{font-size:76px;line-height:1;display:inline-block;animation:bob 2.4s ease-in-out infinite}
 @keyframes bob{50%{transform:translateY(-8px) rotate(-4deg)}}
 .ov-title{font-size:27px;font-weight:800;margin:14px 0 6px}
-.ov-sub{font-size:16px;color:var(--muted);line-height:1.45}
+.ov-sub{font-size:18.5px;color:var(--muted);line-height:1.45}
+.ov-card .btn{font-size:17px;text-transform:lowercase}
+
+/* словарь */
+.back{align-self:flex-start;font-size:16px;font-weight:700;color:var(--primary);margin:2px 0 0}
+:root[data-theme="dark"] .back{color:var(--pink)}
+.chips{display:flex;gap:8px;overflow-x:auto;margin:12px 0 4px;scrollbar-width:none}
+.chips::-webkit-scrollbar{height:0}
+.fchip{flex:none;border:1.5px solid var(--line);background:var(--surface);border-radius:100px;padding:8px 12px;font-size:14px;font-weight:600;color:var(--muted)}
+.fchip.on{background:var(--primary);border-color:var(--primary);color:var(--primary-ink)}
+.badge{display:inline-block;font-size:11px;font-weight:700;border-radius:100px;padding:2px 8px;margin-top:4px}
+.badge.learned{background:var(--primary);color:var(--primary-ink)}
+.badge.progress{background:var(--banner);color:var(--ink)}
+.badge.new{background:var(--track);color:var(--muted)}
+.item .c .ok{color:var(--primary);font-weight:700}
+.item .c .bad{color:#B4436C;font-weight:700}
 .ov-card .btn{width:100%;margin-top:22px}
 .celebrate{pointer-events:auto}
 .celebrate .ov-card{background:linear-gradient(155deg,var(--card-a),var(--card-b));color:#fff}
@@ -202,7 +219,7 @@ input{width:100%;font:inherit;font-size:16px;color:var(--ink);background:var(--s
     </div>
   </div>
 
-  <button class="mode" id="modeBtn"><span class="ch">«</span><span id="modeLabel">Русский → Армянский</span><span class="ch">»</span></button>
+  <button class="mode" id="modeBtn"><span id="modeLabel">RUS → ARM</span></button>
 
   <div id="askControls">
     <button class="btn main mic" id="mic">
@@ -251,8 +268,24 @@ input{width:100%;font:inherit;font-size:16px;color:var(--ink);background:var(--s
     <div class="tile"><div class="n" id="stNew">0</div><div class="l">ещё не было</div></div>
   </div>
   <div class="help">Слово считается выученным после трёх правильных ответов.</div>
+  <div class="row"><button class="btn" id="dictBtn">📖 Словарь — все слова</button></div>
   <h3>Самые трудные слова</h3>
   <div class="list" id="hardList"></div>
+</main>
+
+<!-- словарь -->
+<main class="view" id="viewDict" hidden>
+  <button class="back" id="dictBack">‹ Статистика</button>
+  <h2>Словарь</h2>
+  <input id="dictSearch" type="search" placeholder="Поиск по-русски или по-армянски" autocomplete="off" autocapitalize="off" spellcheck="false">
+  <div class="chips" id="dictChips">
+    <button class="fchip on" data-f="all">Все</button>
+    <button class="fchip" data-f="learned">Выучено</button>
+    <button class="fchip" data-f="progress">В процессе</button>
+    <button class="fchip" data-f="new">Новые</button>
+  </div>
+  <div class="help" id="dictCount"></div>
+  <div class="list" id="dictList"></div>
 </main>
 
 <!-- настройки -->
@@ -268,6 +301,11 @@ input{width:100%;font:inherit;font-size:16px;color:var(--ink);background:var(--s
       <li>Нажми «Create API key», скопируй ключ и вставь сюда.</li>
     </ol>
   </div>
+  <label for="ghInput">Ключ GitHub для резервной копии прогресса</label>
+  <input id="ghInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="ghp_…">
+  <div class="row"><button class="btn main" id="ghSave">Сохранить и подключить</button></div>
+  <div class="note" id="ghNote"></div>
+  <div class="help">Копия обновляется сама при каждом закрытии приложения. Если прогресс на телефоне сотрётся — вставь этот ключ снова, и всё вернётся.</div>
   <label>Тема</label>
   <div class="row"><button class="btn" id="themeBtn">◐ Светлая / тёмная</button></div>
   <label>Прогресс</label>
@@ -282,7 +320,7 @@ input{width:100%;font:inherit;font-size:16px;color:var(--ink);background:var(--s
   </button>
   <button class="tab" data-view="viewStats">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M7 6H4v1a3 3 0 0 0 3 3M17 6h3v1a3 3 0 0 1-3 3"/></svg>
-    Прогресс
+    Статистика
   </button>
   <button class="tab" data-view="viewSet">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
