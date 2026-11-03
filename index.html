@@ -38,14 +38,16 @@ button{font-family:inherit;font-size:inherit;color:inherit;cursor:pointer}
 
 /* top bar */
 .top{display:flex;align-items:center;gap:8px;margin-bottom:14px}
-.streak{display:flex;align-items:baseline;gap:8px;margin-right:auto}
-.streak .n{font-family:var(--display);font-weight:900;font-size:28px;letter-spacing:-.03em;line-height:1;color:var(--orange)}
-.streak .l{font-size:12px;color:var(--muted);line-height:1.2}
+.streak{display:flex;align-items:center;gap:6px;margin-right:auto;min-width:0;flex-wrap:nowrap}
+.chip{display:inline-flex;align-items:baseline;gap:5px;white-space:nowrap;font-size:13px;color:var(--muted);background:var(--surface);border:1px solid var(--line);border-radius:100px;padding:6px 11px}
+.chip b{font-size:18px;font-weight:800;color:var(--ink);line-height:1}
+.chip:first-child b{color:var(--orange)}
 .pill{border:1px solid var(--line);background:var(--surface);border-radius:100px;padding:8px 13px;font-size:13px;font-weight:700;white-space:nowrap}
 .pill.on{background:var(--orange);border-color:var(--orange);color:#fff}
 .net{font-size:11px;font-weight:700;color:var(--muted);display:flex;align-items:center;gap:5px}
 .net i{width:7px;height:7px;border-radius:50%;background:var(--cool)}
 .net.off i{background:var(--faint)}
+.net span{display:none}
 
 /* card */
 .card{flex:1;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--line);border-radius:22px;padding:22px 18px 18px;position:relative;overflow:hidden;box-shadow:var(--shadow)}
@@ -72,7 +74,9 @@ button{font-family:inherit;font-size:inherit;color:inherit;cursor:pointer}
 .verdict.bad .big{color:var(--heat)}
 .verdict .heard{font-weight:500;color:var(--muted);font-size:14px}
 .verdict .heard b{color:var(--ink);font-weight:700}
-.spacer{flex:1;min-height:20px}
+.center{flex:1;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:18px 0;min-height:200px}
+.center .prompt{margin:0}
+.center .answer{width:100%}
 
 /* buttons */
 .row{display:flex;gap:10px;margin-top:10px}
@@ -128,17 +132,21 @@ input,select{width:100%;font:inherit;font-size:16px;color:var(--ink);background:
 <body>
 <div class="app">
   <div class="top">
-    <div class="streak"><span class="n" id="streak">0</span><span class="l">подряд<br>без ошибок · рекорд <b id="best">0</b></span></div>
+    <div class="streak">
+      <span class="chip">🔥 <b id="streak">0</b> подряд без ошибок</span>
+      <span class="chip">🏆 рекорд <b id="best">0</b></span>
+    </div>
     <span class="net" id="net"><i></i><span>онлайн</span></span>
   </div>
 
   <div class="card" id="card">
     <div class="dir"><span id="dirLabel">Скажи по-армянски</span><span class="tag" id="tag"></span></div>
-    <div class="prompt" id="prompt">…</div>
-    <div class="hint" id="hint"></div>
-    <div class="verdict" id="verdict"></div>
-    <div class="answer" id="answer"><div class="a" id="answerText"></div></div>
-    <div class="spacer"></div>
+    <div class="center">
+      <div class="prompt" id="prompt">…</div>
+      <div class="hint" id="hint"></div>
+      <div class="answer" id="answer"><div class="a" id="answerText"></div></div>
+      <div class="verdict" id="verdict"></div>
+    </div>
 
     <div id="askControls">
       <button class="btn main mic" id="mic"><span class="dot"></span><span id="micLabel">Ответить голосом</span></button>
