@@ -202,7 +202,6 @@ const promptText = () => (S.mode === 'ru2hy' ? cur.ru : cur.hy);
 function nextCard() {
   clearTimeout(autoNext);
   cur = pickWord(cur);
-  renderPool();
   graded = false;
   hints = 0;
   $('dirLabel').textContent = S.mode === 'ru2hy' ? 'Скажи по-армянски' : 'Скажи по-русски';
@@ -891,11 +890,7 @@ function poolText() {
   if (full.length && inFull === p.length && full.length <= 2) return full.map(([n]) => n).join(' + ');
   return wordsTxt(p.length);
 }
-function renderPool() {
-  const fresh = S.deckSig === pool().map(w => w.hy).join('|');
-  const left = fresh ? (S.deck || []).length : 0;
-  $('poolLabel').textContent = 'Учу: ' + poolText() + (left ? ' · до конца круга ' + left : '');
-}
+function renderPool() { $('poolLabel').textContent = 'Учу: ' + poolText(); }
 
 function checkbox(state, onTap) {
   const c = document.createElement('button');
