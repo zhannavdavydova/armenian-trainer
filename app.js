@@ -110,30 +110,37 @@ const rec = (w, mode) => S.cards[cardKey(w, mode)];
 const pickedWords = () => WORDS.filter(w => S.picked[w.hy]);
 const pool = () => { const p = pickedWords(); return p.length ? p : WORDS; };
 
-// как часто брать новое слово, когда есть что повторять (раньше повторы всегда шли первыми и новые почти не появлялись)
-const NEW_SHARE = 0.4;
+// Колода: все слова выбранного набора по одному разу в случайном порядке, потом новая колода.
+// Выученные попадают в колоду, только когда подошёл их срок, — реже, но не пропадают.
+// Ошибка возвращает слово в ту же колоду один раз, через RETRY_GAP других карточек.
+const RETRY_GAP = 10;
+
+function shuffle(a) {
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+
+function buildDeck(words) {
+  let deck = words.filter(w => { const r = rec(w); return !S.learned[w.hy] || !r || r.due <= S.step; });
+  if (deck.length < Math.min(5, words.length)) deck = words.slice();
+  return shuffle(deck.map(w => w.hy));
+}
 
 function pickWord(exclude) {
   const words = pool();
-  const due = [], fresh = [];
-  let soonest = null;
-  for (const w of words) {
-    if (w === exclude && words.length > 1) continue;
-    const r = rec(w);
-    if (!r) fresh.push(w);
-    else if (r.due <= S.step) due.push([w, r]);
-    else if (!soonest || r.due < soonest[1].due) soonest = [w, r];
+  const byHy = new Map(words.map(w => [w.hy, w]));
+  const sig = words.map(w => w.hy).join('|');
+  if (S.deckSig !== sig) { S.deckSig = sig; S.deck = []; }
+  S.deck = (S.deck || []).filter(h => byHy.has(h));
+  if (!S.deck.length) {
+    S.deck = buildDeck(words);
+    S.retried = {};
+    // на стыке колод не показываем то же слово дважды подряд
+    if (exclude && S.deck.length > 1 && S.deck[0] === exclude.hy) S.deck.push(S.deck.shift());
   }
-  // ошибки возвращаются ровно через 6–7 карточек, без лотереи
-  const missed = due.filter(([, r]) => r.lvl === 0);
-  if (missed.length) return missed.sort((a, b) => a[1].due - b[1].due)[0][0];
-  if (fresh.length && (!due.length || Math.random() < NEW_SHARE)) return pick(fresh);
-  if (due.length) {
-    // самые «просроченные» вперёд, среди первых трёх — случайно
-    due.sort((a, b) => a[1].due - b[1].due);
-    return pick(due.slice(0, 3))[0];
-  }
-  return soonest ? soonest[0] : words[0];
+  const w = byHy.get(S.deck.shift());
+  save(false);
+  return w;
 }
 
 // kind: 'right' | 'hint' | 'wrong'
@@ -147,7 +154,13 @@ function grade(kind) {
   if (kind === 'wrong') {
     r.wrong++;
     r.lvl = 0;
-    r.due = S.step + 7 + (Math.random() * 2 | 0); // между ошибкой и повтором — 6–7 других карточек
+    r.due = S.step + 7 + (Math.random() * 2 | 0);
+    // ещё раз в этой колоде; если она почти кончилась — слово и так будет в следующей
+    S.retried = S.retried || {};
+    if (!S.retried[cur.hy] && S.deck && S.deck.length >= 3) {
+      S.retried[cur.hy] = 1;
+      S.deck.splice(Math.min(RETRY_GAP, S.deck.length), 0, cur.hy);
+    }
     S.streak = 0;
   } else {
     r.right++;
@@ -189,6 +202,7 @@ const promptText = () => (S.mode === 'ru2hy' ? cur.ru : cur.hy);
 function nextCard() {
   clearTimeout(autoNext);
   cur = pickWord(cur);
+  renderPool();
   graded = false;
   hints = 0;
   $('dirLabel').textContent = S.mode === 'ru2hy' ? 'Скажи по-армянски' : 'Скажи по-русски';
@@ -877,7 +891,11 @@ function poolText() {
   if (full.length && inFull === p.length && full.length <= 2) return full.map(([n]) => n).join(' + ');
   return wordsTxt(p.length);
 }
-function renderPool() { $('poolLabel').textContent = 'Учу: ' + poolText(); }
+function renderPool() {
+  const fresh = S.deckSig === pool().map(w => w.hy).join('|');
+  const left = fresh ? (S.deck || []).length : 0;
+  $('poolLabel').textContent = 'Учу: ' + poolText() + (left ? ' · до конца круга ' + left : '');
+}
 
 function checkbox(state, onTap) {
   const c = document.createElement('button');
