@@ -52,7 +52,7 @@ const pick = list => list[Math.random() * list.length | 0];
 
 function defaults() {
   return { step: 0, mode: 'ru2hy', streak: 0, best: 0, cards: {}, learned: {}, key: '', theme: 'light', models: null, modelsAt: 0,
-    ghToken: '', gistId: '', backupAt: 0, backupDirty: false };
+    ghToken: '', gistId: '', backupAt: 0, backupDirty: false, picked: {} };
 }
 function load() {
   try { return Object.assign(defaults(), JSON.parse(localStorage.getItem(STORE) || '{}')); }
@@ -106,23 +106,34 @@ function renderLevel() {
 const cardKey = (w, mode = S.mode) => mode + ':' + w.hy;
 const rec = (w, mode) => S.cards[cardKey(w, mode)];
 
+// слова, отмеченные в словаре; ничего не отмечено — учим все
+const pickedWords = () => WORDS.filter(w => S.picked[w.hy]);
+const pool = () => { const p = pickedWords(); return p.length ? p : WORDS; };
+
+// как часто брать новое слово, когда есть что повторять (раньше повторы всегда шли первыми и новые почти не появлялись)
+const NEW_SHARE = 0.4;
+
 function pickWord(exclude) {
+  const words = pool();
   const due = [], fresh = [];
   let soonest = null;
-  for (const w of WORDS) {
-    if (w === exclude && WORDS.length > 1) continue;
+  for (const w of words) {
+    if (w === exclude && words.length > 1) continue;
     const r = rec(w);
     if (!r) fresh.push(w);
     else if (r.due <= S.step) due.push([w, r]);
     else if (!soonest || r.due < soonest[1].due) soonest = [w, r];
   }
+  // ошибки возвращаются ровно через 6–7 карточек, без лотереи
+  const missed = due.filter(([, r]) => r.lvl === 0);
+  if (missed.length) return missed.sort((a, b) => a[1].due - b[1].due)[0][0];
+  if (fresh.length && (!due.length || Math.random() < NEW_SHARE)) return pick(fresh);
   if (due.length) {
     // самые «просроченные» вперёд, среди первых трёх — случайно
     due.sort((a, b) => a[1].due - b[1].due);
     return pick(due.slice(0, 3))[0];
   }
-  if (fresh.length) return pick(fresh);
-  return soonest ? soonest[0] : WORDS[0];
+  return soonest ? soonest[0] : words[0];
 }
 
 // kind: 'right' | 'hint' | 'wrong'
@@ -693,7 +704,7 @@ const GH = 'https://api.github.com/';
 const GIST_FILE = 'armenian-trainer-progress.json';
 const GIST_DESC = 'Армянский тренажёр — резервная копия прогресса';
 const ghHeaders = token => ({ Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json' });
-const PROGRESS_FIELDS = ['step', 'mode', 'streak', 'best', 'cards', 'learned', 'theme'];
+const PROGRESS_FIELDS = ['step', 'mode', 'streak', 'best', 'cards', 'learned', 'theme', 'picked'];
 
 // в копию идёт только прогресс — ключи Gemini и GitHub остаются на телефоне
 function backupPayload() {
@@ -748,7 +759,7 @@ function restoreFrom(r) {
   for (const k of PROGRESS_FIELDS) if (r[k] !== undefined) S[k] = r[k];
   S.backupDirty = false;
   save(false);
-  applyTheme(); renderMode(); renderStreak(); renderLevel(); nextCard();
+  applyTheme(); renderMode(); renderStreak(); renderLevel(); renderPool(); nextCard();
 }
 
 async function connectBackup(token) {
@@ -841,36 +852,110 @@ function wordStatus(w) {
 }
 const STATUS_TXT = { learned: 'выучено', progress: 'в процессе', new: 'новое' };
 
+const blocks = () => {
+  const m = new Map();
+  for (const w of WORDS) (m.get(w.block) || m.set(w.block, []).get(w.block)).push(w);
+  return [...m];
+};
+const openBlocks = new Set();
+let poolChanged = false;
+
+function setPicked(words, on) {
+  for (const w of words) { if (on) S.picked[w.hy] = 1; else delete S.picked[w.hy]; }
+  poolChanged = true;
+  save();
+  renderDict();
+  renderPool();
+}
+
+// что сейчас в карточках: «все слова», название блока или число слов
+function poolText() {
+  const p = pickedWords();
+  if (!p.length) return 'все слова';
+  const full = blocks().filter(([, ws]) => ws.every(w => S.picked[w.hy]));
+  const inFull = full.reduce((n, [, ws]) => n + ws.length, 0);
+  if (full.length && inFull === p.length && full.length <= 2) return full.map(([n]) => n).join(' + ');
+  return wordsTxt(p.length);
+}
+function renderPool() { $('poolLabel').textContent = 'Учу: ' + poolText(); }
+
+function checkbox(state, onTap) {
+  const c = document.createElement('button');
+  c.className = 'chk' + (state ? ' ' + state : '');
+  c.setAttribute('aria-label', 'Учить');
+  c.onclick = e => { e.stopPropagation(); onTap(); };
+  return c;
+}
+
+function wordRow(w) {
+  const a = rec(w, 'ru2hy') || {}, b = rec(w, 'hy2ru') || {};
+  const right = (a.right || 0) + (b.right || 0), wrong = (a.wrong || 0) + (b.wrong || 0);
+  const st = wordStatus(w);
+  const on = !!S.picked[w.hy];
+  const it = document.createElement('div');
+  it.className = 'item pickable';
+  const toggle = () => setPicked([w], !on);
+  it.onclick = toggle;
+  const box = document.createElement('div');
+  box.className = 'w';
+  const hb = document.createElement('b'); hb.textContent = w.hy;
+  const rs = document.createElement('span'); rs.textContent = w.ru;
+  const bd = document.createElement('div');
+  const badge = document.createElement('span'); badge.className = 'badge ' + st; badge.textContent = STATUS_TXT[st];
+  bd.appendChild(badge);
+  box.append(hb, rs, bd);
+  const c = document.createElement('div');
+  c.className = 'c';
+  if (right || wrong) {
+    const ok = document.createElement('span'); ok.className = 'ok'; ok.textContent = '✓ ' + right;
+    const bad = document.createElement('span'); bad.className = 'bad'; bad.textContent = '✗ ' + wrong;
+    c.append(ok, document.createElement('br'), bad);
+  }
+  it.append(checkbox(on ? 'on' : '', toggle), box, c);
+  return it;
+}
+
 function renderDict() {
   const q = norm($('dictSearch').value);
-  const rows = WORDS.filter(w => (dictFilter === 'all' || wordStatus(w) === dictFilter) &&
-    (!q || norm(w.hy).includes(q) || norm(w.ru).includes(q)));
-  $('dictCount').textContent = wordsTxt(rows.length);
+  const match = w => (dictFilter === 'all' || wordStatus(w) === dictFilter) &&
+    (!q || norm(w.hy).includes(q) || norm(w.ru).includes(q));
+  const filtering = q || dictFilter !== 'all';
+  const picked = pickedWords().length;
+  $('dictCount').textContent = picked ? 'В карточках: ' + wordsTxt(picked) : 'Отметь блок или отдельные слова — карточки будут только из них. Сейчас учатся все слова.';
+  $('dictClear').hidden = !picked;
   const list = $('dictList');
   list.innerHTML = '';
-  for (const w of rows) {
-    const a = rec(w, 'ru2hy') || {}, b = rec(w, 'hy2ru') || {};
-    const right = (a.right || 0) + (b.right || 0), wrong = (a.wrong || 0) + (b.wrong || 0);
-    const st = wordStatus(w);
-    const it = document.createElement('div');
-    it.className = 'item';
+  let shown = 0;
+  for (const [name, ws] of blocks()) {
+    const rows = ws.filter(match);
+    if (!rows.length) continue;
+    shown += rows.length;
+    const n = ws.filter(w => S.picked[w.hy]).length;
+    const state = n === ws.length ? 'on' : n ? 'part' : '';
+    const open = filtering || openBlocks.has(name);
+    const h = document.createElement('div');
+    h.className = 'blk' + (open ? ' open' : '') + (state ? ' sel' : '');
+    h.onclick = () => { openBlocks.has(name) ? openBlocks.delete(name) : openBlocks.add(name); renderDict(); };
+    const t = document.createElement('div');
+    t.className = 't';
+    const tb = document.createElement('b'); tb.textContent = name;
+    const ts = document.createElement('span');
+    ts.textContent = wordsTxt(ws.length) + ' · выучено ' + ws.filter(w => S.learned[w.hy]).length + (n && n < ws.length ? ' · отмечено ' + n : '');
+    t.append(tb, ts);
+    const chev = document.createElement('span'); chev.className = 'chev'; chev.textContent = '›';
+    h.append(checkbox(state, () => setPicked(ws, state !== 'on')), t, chev);
+    list.appendChild(h);
+    if (!open) continue;
     const box = document.createElement('div');
-    box.className = 'w';
-    const hb = document.createElement('b'); hb.textContent = w.hy;
-    const rs = document.createElement('span'); rs.textContent = w.ru;
-    const bd = document.createElement('div');
-    const badge = document.createElement('span'); badge.className = 'badge ' + st; badge.textContent = STATUS_TXT[st];
-    bd.appendChild(badge);
-    box.append(hb, rs, bd);
-    const c = document.createElement('div');
-    c.className = 'c';
-    if (right || wrong) {
-      const ok = document.createElement('span'); ok.className = 'ok'; ok.textContent = '✓ ' + right;
-      const bad = document.createElement('span'); bad.className = 'bad'; bad.textContent = '✗ ' + wrong;
-      c.append(ok, document.createElement('br'), bad);
-    }
-    it.append(box, c);
-    list.appendChild(it);
+    box.className = 'blk-words';
+    for (const w of rows) box.appendChild(wordRow(w));
+    list.appendChild(box);
+  }
+  if (!shown) {
+    const e = document.createElement('div');
+    e.className = 'empty';
+    e.textContent = 'Ничего не нашлось';
+    list.appendChild(e);
   }
 }
 
@@ -883,6 +968,8 @@ function showView(id) {
   if (id === 'viewDict') renderDict();
   if (id === 'viewSet') openSettings();
   if (id === 'viewTrain' && !$('askControls').hidden) renderMic();
+  // поменялся выбор слов, а на экране слово не из него — сразу берём подходящее
+  if (id === 'viewTrain' && poolChanged) { poolChanged = false; if (!graded && cur && !pool().includes(cur)) nextCard(); }
   window.scrollTo(0, 0);
 }
 
@@ -930,9 +1017,14 @@ function bind() {
     save(); renderMode(); nextCard();
   };
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => showView(t.dataset.view));
-  $('dictBtn').onclick = () => showView('viewDict');
-  $('dictBack').onclick = () => showView('viewStats');
+  // в словарь можно прийти из статистики или с карточек — туда же и возвращаемся
+  let dictFrom = 'viewStats';
+  const openDict = from => { dictFrom = from; $('dictBack').textContent = from === 'viewTrain' ? '‹ Карточки' : '‹ Статистика'; showView('viewDict'); };
+  $('dictBtn').onclick = () => openDict('viewStats');
+  $('dictBack').onclick = () => showView(dictFrom);
   $('dictSearch').oninput = renderDict;
+  $('dictClear').onclick = () => setPicked(WORDS, false);
+  $('poolLabel').onclick = () => openDict('viewTrain');
   document.querySelectorAll('.fchip').forEach(ch => ch.onclick = () => {
     dictFilter = ch.dataset.f;
     document.querySelectorAll('.fchip').forEach(x => x.classList.toggle('on', x === ch));
@@ -995,13 +1087,14 @@ async function init() {
   renderStreak();
   try {
     const res = await fetch('words.json', { cache: 'no-cache' });
-    WORDS = (await res.json()).map(({ hy, ru }) => ({ hy, ru }));
+    WORDS = (await res.json()).map(({ hy, ru, block }) => ({ hy, ru, block: block || 'Без блока' }));
   } catch (e) {
     $('prompt').textContent = 'Не удалось загрузить слова';
     return;
   }
   backfillLearned();
   save(false);
+  renderPool();
   renderLevel();
   nextCard();
   welcome();
