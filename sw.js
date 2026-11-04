@@ -1,5 +1,5 @@
 // Офлайн-кэш: оболочка приложения из кэша, словарь — сначала из сети (чтобы новые слова приходили сами)
-const CACHE = 'hy-trainer-v7';
+const CACHE = 'hy-trainer-v8';
 const SHELL = ['./', 'index.html', 'app.js', 'words.json', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {

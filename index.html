@@ -54,7 +54,8 @@ button{font-family:inherit;font-size:inherit;color:inherit;cursor:pointer;border
 .bar{height:9px;border-radius:9px;background:var(--track);margin:7px 0 4px;overflow:hidden}
 .bar i{display:block;height:100%;width:0;border-radius:9px;background:linear-gradient(90deg,var(--primary),var(--lav));transition:width .6s cubic-bezier(.2,.8,.2,1)}
 .bar-txt{display:flex;justify-content:space-between;font-size:12.5px;font-weight:600}
-.bar-txt b,.bar-txt span{color:var(--pink);font-weight:700}
+.bar-txt b,.bar-txt span{color:#9A587F;font-weight:700}
+:root[data-theme="dark"] .bar-txt b,:root[data-theme="dark"] .bar-txt span{color:var(--pink)}
 
 /* плашка серии */
 .banner{display:flex;align-items:center;gap:10px;background:var(--banner);border-radius:16px;padding:11px 14px;margin:14px 0 16px;font-size:14.5px;font-weight:500}
