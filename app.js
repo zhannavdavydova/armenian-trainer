@@ -111,20 +111,14 @@ const pickedWords = () => WORDS.filter(w => S.picked[w.hy]);
 const pool = () => { const p = pickedWords(); return p.length ? p : WORDS; };
 
 // Колода: все слова выбранного набора по одному разу в случайном порядке, потом новая колода.
-// Выученные попадают в колоду, только когда подошёл их срок, — реже, но не пропадают.
-// Ошибка возвращает слово в ту же колоду один раз, через RETRY_GAP других карточек.
-const RETRY_GAP = 10;
+// Приоритет у всех одинаковый — ни ошибки, ни «выучено» на порядок не влияют.
 
 function shuffle(a) {
   for (let i = a.length - 1; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [a[i], a[j]] = [a[j], a[i]]; }
   return a;
 }
 
-function buildDeck(words) {
-  let deck = words.filter(w => { const r = rec(w); return !S.learned[w.hy] || !r || r.due <= S.step; });
-  if (deck.length < Math.min(5, words.length)) deck = words.slice();
-  return shuffle(deck.map(w => w.hy));
-}
+const buildDeck = words => shuffle(words.map(w => w.hy));
 
 function pickWord(exclude) {
   const words = pool();
@@ -134,7 +128,6 @@ function pickWord(exclude) {
   S.deck = (S.deck || []).filter(h => byHy.has(h));
   if (!S.deck.length) {
     S.deck = buildDeck(words);
-    S.retried = {};
     // на стыке колод не показываем то же слово дважды подряд
     if (exclude && S.deck.length > 1 && S.deck[0] === exclude.hy) S.deck.push(S.deck.shift());
   }
@@ -155,12 +148,6 @@ function grade(kind) {
     r.wrong++;
     r.lvl = 0;
     r.due = S.step + 7 + (Math.random() * 2 | 0);
-    // ещё раз в этой колоде; если она почти кончилась — слово и так будет в следующей
-    S.retried = S.retried || {};
-    if (!S.retried[cur.hy] && S.deck && S.deck.length >= 3) {
-      S.retried[cur.hy] = 1;
-      S.deck.splice(Math.min(RETRY_GAP, S.deck.length), 0, cur.hy);
-    }
     S.streak = 0;
   } else {
     r.right++;
